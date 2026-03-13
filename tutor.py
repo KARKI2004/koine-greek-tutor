@@ -128,7 +128,14 @@ async def run_microphone() -> None:
         pya.terminate()
 
     captured_audio = b"".join(chunks)
-    print(f"Captured {len(captured_audio)} bytes from microphone")
+
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
+        await session.send_realtime_input(
+            audio=types.Blob(data=captured_audio, mime_type="audio/pcm;rate=16000")
+        )
+        await session.send_realtime_input(audio_stream_end=True)
+        await play_response_audio(session)
 
 
 if __name__ == "__main__":

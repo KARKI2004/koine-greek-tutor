@@ -1,4 +1,6 @@
 google-genai
 python-dotenv
 pyaudio
+sounddevice
 numpy
+soundfile
