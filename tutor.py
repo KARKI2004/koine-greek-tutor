@@ -17,13 +17,50 @@ RECEIVE_SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH_BYTES = 2
 CHUNK_SAMPLES = 1600  # 100ms at 16kHz
+MIC_DURATION_SECONDS = 5  # change to adjust recording length
 
-CONFIG = {
+
+MIC_SYSTEM_INSTRUCTION = """
+You are a Koine Greek tutor.
+
+For every user utterance, always respond in this exact order:
+1. Say the Greek sentence again with correct Erasmian pronunciation.
+2. Give the English translation.
+3. If the user's pronunciation had mistakes, briefly correct them.
+
+Rules:
+- Always include all applicable parts.
+- Keep the response short.
+- Do not add unrelated commentary.f
+- Speak slowly and clearly for learners.
+"""
+
+
+FILE_SYSTEM_INSTRUCTION = """
+You are a Koine Greek language assistant.
+
+For every audio recording, always respond in this exact order:
+1. Give a short English summary of the whole recording.
+2. Give the English translation of the Greek content.
+3. Repeat the key Greek phrase or sentence with Erasmian pronunciation if Greek speech is present.
+
+Rules:
+- Always include the summary first.
+- Do not skip the translation.
+- Keep the response short and clear.
+- Do not add unrelated commentary.
+"""
+
+
+MIC_CONFIG = {
     "response_modalities": ["AUDIO"],
-    "system_instruction": (
-        "You are a Koine Greek tutor. "
-        "Give clear erasmian pronunciation, give its translation in english."
-    ),
+    "system_instruction": MIC_SYSTEM_INSTRUCTION,
+}
+
+
+FILE_CONFIG = {
+    "response_modalities": ["AUDIO"],
+    "system_instruction": FILE_SYSTEM_INSTRUCTION,
 }
 
 
@@ -66,7 +103,6 @@ async def stream_wav_audio(session, path: str) -> None:
             await session.send_realtime_input(
                 audio=types.Blob(data=chunk, mime_type=f"audio/pcm;rate={SEND_SAMPLE_RATE}")
             )
-    # Explicitly flush buffered audio/VAD state for file-based input.
     await session.send_realtime_input(audio_stream_end=True)
 
 
@@ -102,12 +138,12 @@ async def run_audio_file(audio_path: str) -> None:
         raise RuntimeError("Missing GEMINI_API_KEY in .env")
 
     client = genai.Client(api_key=api_key)
-    async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
+    async with client.aio.live.connect(model=MODEL, config=FILE_CONFIG) as session:
         await stream_wav_audio(session, audio_path)
         await play_response_audio(session)
 
 
-async def run_microphone() -> None:
+async def run_microphone(duration: int = MIC_DURATION_SECONDS) -> None:
     pya = pyaudio.PyAudio()
     stream = pya.open(
         format=pyaudio.paInt16,
@@ -116,25 +152,37 @@ async def run_microphone() -> None:
         input=True,
         frames_per_buffer=CHUNK_SAMPLES,
     )
-    chunks = []
-    total_chunks = int((SEND_SAMPLE_RATE * 3) / CHUNK_SAMPLES)
 
+    chunks = []
+    total_chunks = int((SEND_SAMPLE_RATE * duration) / CHUNK_SAMPLES)
+
+    print("Listening...")
     try:
         for _ in range(total_chunks):
-            chunks.append(stream.read(CHUNK_SAMPLES))
+            chunks.append(
+                stream.read(CHUNK_SAMPLES, exception_on_overflow=False)
+            )
     finally:
-        stream.stop_stream()
+        if stream.is_active():
+            stream.stop_stream()
         stream.close()
         pya.terminate()
 
+    print("Processing...")
     captured_audio = b"".join(chunks)
 
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-    async with client.aio.live.connect(model=MODEL, config=CONFIG) as session:
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing GEMINI_API_KEY in .env")
+
+    client = genai.Client(api_key=api_key)
+
+    async with client.aio.live.connect(model=MODEL, config=MIC_CONFIG) as session:
         await session.send_realtime_input(
             audio=types.Blob(data=captured_audio, mime_type="audio/pcm;rate=16000")
         )
         await session.send_realtime_input(audio_stream_end=True)
+        print("Speaking...")
         await play_response_audio(session)
 
 
@@ -150,8 +198,19 @@ if __name__ == "__main__":
         action="store_true",
         help="Use microphone input mode.",
     )
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=MIC_DURATION_SECONDS,
+        help="Recording duration in seconds (mic mode only).",
+    )
+
     args = parser.parse_args()
+
+    if args.duration > 40:
+        parser.error("Duration cannot exceed 40 seconds.")
+
     if args.audio:
         asyncio.run(run_audio_file(args.audio))
     elif args.mic:
-        asyncio.run(run_microphone())
+        asyncio.run(run_microphone(duration=args.duration))
